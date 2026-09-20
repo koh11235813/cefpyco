@@ -33,6 +33,7 @@
 
 typedef int cefpyco_reg_api(CefT_Client_Handle, uint16_t, const char*);
 static int  call_register(PyObject* args, PyObject* kw, cefpyco_reg_api api);
+static int  call_register_route(PyObject* args, PyObject* kw, cefpyco_reg_api api);
 
 PYWRAP_DEF(begin) {
     long long    res;
@@ -256,7 +257,7 @@ PYWRAP_DEF(build_msgorg_value) {
     CefT_MsgOrg_Params org;
     static char*       keywords[] = {"symbolic_f",  "longlife_f",  "selective_f",
                                      "req_chunk",   "first_chunk", "last_chunk",
-                                     "version_val", "from_pub_f",  NULL};
+                                     "from_pub_f",  NULL};
     /* Optional keyword arguments */
     int              symbolic_f = 0;
     int              longlife_f = 0;
@@ -264,13 +265,11 @@ PYWRAP_DEF(build_msgorg_value) {
     int              req_chunk = 0;
     int              first_chunk = 0;
     int              last_chunk = -1;
-    const char*      version_val;
-    const Py_ssize_t version_siz;
     int              from_pub_f = 0;
 
     if (!PyArg_ParseTupleAndKeywords(
-            args, kw, "iiiiiiz#i", keywords, &symbolic_f, &longlife_f, &selective_f, &req_chunk,
-            &first_chunk, &last_chunk, &version_val, &version_siz, &from_pub_f)) {
+            args, kw, "iiiiiii", keywords, &symbolic_f, &longlife_f, &selective_f, &req_chunk,
+            &first_chunk, &last_chunk, &from_pub_f)) {
         return NULL;
     }
     memset(&org, 0x00, sizeof(org));
@@ -284,11 +283,6 @@ PYWRAP_DEF(build_msgorg_value) {
             org.last_chunk_f = 1;
             org.last_chunk = last_chunk;
         }
-    }
-    if (version_siz) {
-        org.version_f = 1;
-        org.version_len = version_siz;
-        memcpy(org.version_val, version_val, version_siz);
     }
 
     memset(buff, 0x00, sizeof(buff));
@@ -322,6 +316,28 @@ static int call_register(PyObject* args, PyObject* kw, cefpyco_reg_api api) {
     return 0;
 }
 
+PYWRAP_DEF(register_route) {
+    int res;
+    res = call_register_route(args, kw, cph_register_route);
+    if (res < -1) return NULL;
+    PYWRAP_ERR;
+    Py_RETURN_NONE;
+}
+
+static int call_register_route(PyObject* args, PyObject* kw, cefpyco_reg_api api) {
+    int          res;
+    long long    handler;
+    const char*  uri;
+    static char* keywords[] = {"handler", "name"};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "Ls|i", keywords, &handler, &uri)) {
+        return -2;
+    }
+    res = api((CefT_Client_Handle)handler, CefC_Route_Add, uri);
+    if (res < 0) return -1;
+    return 0;
+}
+
 PYWRAP_DEF(receive) {
     int               res;
     long long         handler;
@@ -330,13 +346,13 @@ PYWRAP_DEF(receive) {
     cefpyco_app_frame app_frame;
     int               timeout_ms = CefpycoC_Default_Timeout;
     int               error_on_timeout = 0;
-    char              name[4096];
+    char              name[CefpycoC_Name_Len + 1];
     Py_ssize_t        r_name_len;
-    char              payload[4096];
+    char              payload[CefC_Max_Block + 1];
     Py_ssize_t        r_payload_len;
-    char              hdr_org[256];
+    char              hdr_org[CefC_Max_Header_Size + 1];
     Py_ssize_t        hdr_org_len;
-    char              msg_org[1024];
+    char              msg_org[CefC_Max_Length + 1];
     Py_ssize_t        msg_org_len;
     static char*      keywords[] = {"handler", "error_on_timeout", "timeout_ms", NULL};
 
@@ -357,16 +373,16 @@ PYWRAP_DEF(receive) {
         name[name_len] = '\0';
         r_name_len = name_len;
     }
-    if (app_frame.payload_len <= 0) {
+
+#define minimum(a, b) ((a) < (b) ? (a) : (b))
+    r_payload_len = minimum(sizeof(payload) - 1, app_frame.payload_len);
+    if (r_payload_len <= 0) {
         sprintf(payload, "%s%c", CefpycoC_Null_Msg, '\0');
         r_payload_len = sizeof(CefpycoC_Null_Msg);
     } else {
-        memcpy(payload, app_frame.payload, app_frame.payload_len);
-        payload[app_frame.payload_len] = '\0';
-        r_payload_len = app_frame.payload_len;
+        memcpy(payload, app_frame.payload, r_payload_len);
+        payload[r_payload_len] = '\0';
     }
-
-#define minimum(a, b) ((a) < (b) ? (a) : (b))
 
     hdr_org_len = minimum(sizeof(hdr_org) - 1, app_frame.hdr_org_len);
     if (0 < hdr_org_len) {
@@ -394,7 +410,7 @@ PYWRAP_DEF(receive) {
     fprintf(stderr, "         type:%lld\n", type);
     fprintf(stderr, "   returncode:%lld\n", app_frame.returncode);
     fprintf(stderr, "        flags:%lx\n", app_frame.flags);
-    fprintf(stderr, "   actual len:%llu\n", app_frame.actual_data_len);
+    fprintf(stderr, "   actual len:"FMTU64"\n", app_frame.actual_data_len);
     fprintf(stderr, "         name:[%s]\n", name);
     fprintf(stderr, "     name len:%d (%d)\n", name_len, strlen(name));
     fprintf(stderr, "    chunk num:%d\n", app_frame.chunk_num);
@@ -419,6 +435,7 @@ static PyMethodDef libcefpyco_methods[] = {
     {"send_interest", (PyCFunction)pywrap_send_interest, PYWRAP_METH, ""},
     {"send_data", (PyCFunction)pywrap_send_data, PYWRAP_METH, ""},
     {"register", (PyCFunction)pywrap_register, PYWRAP_METH, ""},
+    {"register_route", (PyCFunction)pywrap_register_route, PYWRAP_METH, ""},
     {"receive", (PyCFunction)pywrap_receive, PYWRAP_METH, ""},
     {"build_hdrorg", (PyCFunction)pywrap_build_hdrorg_value, PYWRAP_METH, ""},
     {"build_msgorg", (PyCFunction)pywrap_build_msgorg_value, PYWRAP_METH, ""},

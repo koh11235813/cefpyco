@@ -41,7 +41,7 @@
 
 #define CefpycoC_Default_Timeout (4000)
 #define CefpycoC_Null_Msg        ("(empty)")
-#define CefpycoC_Name_Len        (2048)
+#define CefpycoC_Name_Len        (CefC_NAME_MAXLEN)
 #define CefpycoC_APIData_Len     (65536)
 #define CefpycoC_Payload_Len     (CefpycoC_APIData_Len - CefpycoC_Name_Len)
 

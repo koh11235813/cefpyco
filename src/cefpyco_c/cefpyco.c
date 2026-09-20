@@ -159,6 +159,14 @@ int cph_register_name(
     return call_register_api(handler, cef_client_prefix_reg, func, uri);
 }
 
+int cph_register_route(
+    CefT_Client_Handle handler,  // cefore handler
+    uint16_t           func,
+    const char*        uri) {
+    MILESTONE
+    return call_register_api(handler, cef_client_prefix_route, func, uri);
+}
+
 static int call_register_api(
     CefT_Client_Handle handler,  // cefore handler
     cefore_reg_api     api,
@@ -283,11 +291,11 @@ int show_app_frame(cefpyco_app_frame* app_frame) {
         "\n[Packet info]\n"
         "  *         version: %08x\n"
         "  *            type: %08x\n"
-        "  * actual_data_len: %llu\n"
+        "  * actual_data_len: "FMTU64"\n"
         "  *            name: '%s'\n"
         "  *        name_len: %hu\n"
         "  *       chunk_num: %u\n"
-        "  *   end_chunk_num: %u\n"
+        "  *   end_chunk_num: "FMTU64"\n"
         "  *         payload: '%s'\n"
         "  *     payload_len: %hu\n",
         app_frame->version,          //

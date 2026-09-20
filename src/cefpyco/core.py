@@ -443,6 +443,8 @@ class CefpycoHandle(object):
         res = _cefpyco.receive(self.handler, i, timeout_ms)
         return CcnPacketInfo(res)
 
+    def register_route(self, name):
+        _cefpyco.register_route(self.handler, name)
 
 @contextmanager
 def create_handle(ceforedir=None, portnum=0, enable_log=True):

@@ -44,6 +44,7 @@ int cph_send_data(
     CefT_Client_Handle handler, CefT_CcnMsg_OptHdr* opt_d, CefT_CcnMsg_MsgBdy* params_d);
 
 int cph_register_name(CefT_Client_Handle handler, uint16_t func, const char* uri);
+int cph_register_route(CefT_Client_Handle handler, uint16_t func, const char* uri);
 int cph_receive(
     CefT_Client_Handle handler, cefpyco_app_frame* app_frame, int timeout_ms, int error_on_timeout);
 
@@ -66,6 +67,7 @@ int           end_cef(void);
 int send_interest(const char* uri, int chunk_num);
 int send_data(const char* uri, int chunk_num, const char* payload, int payload_len);
 int register_name(const char* uri);
+int register_route(const char* uri);
 int deregister_name(const char* uri);
 int receive(cefpyco_app_frame* app_frame, int error_on_timeout, int timeout_ms);
 
