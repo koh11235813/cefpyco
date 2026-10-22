@@ -15,11 +15,11 @@ import json
 
 # cefpyco's C layer frame buffer is CefpycoC_APIData_Len (65536) minus
 # CefpycoC_Name_Len (CefC_NAME_MAXLEN, 1024) -- see
-# cefpyco/src/cefpyco_c/include/cefpyco_def.h's CefpycoC_Payload_Len. cefpyco's
-# send_data() never checks payload length itself (this is a known cefpyco
-# footgun, see docs/wayfinder/semantic-index/map.md's cefpyco notes), so this
-# layer enforces the bound before handing bytes to cefpyco, instead of letting
-# an oversized payload overrun the shared C buffer.
+# cefpyco/src/cefpyco_c/include/cefpyco_def.h's CefpycoC_Payload_Len.
+# cefpyco's send_data() never checks payload length itself (a known cefpyco
+# footgun, noted in the semindex effort's map.md under its cefpyco usage
+# notes), so this layer enforces the bound before handing bytes to cefpyco,
+# instead of letting an oversized payload overrun the shared C buffer.
 MAX_PAYLOAD_BYTES = 65536 - 1024
 
 

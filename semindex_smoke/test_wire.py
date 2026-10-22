@@ -25,30 +25,41 @@ def test_encode_decode_round_trip():
 
 
 def test_encode_rejects_oversized_payload():
-    # +1 over the limit on a per-character-is-one-byte ASCII name makes this
-    # exact: pad the name until the encoded JSON crosses MAX_PAYLOAD_BYTES.
+    # A name of exactly MAX_PAYLOAD_BYTES ASCII characters, plus the 23
+    # bytes of JSON structure encode_answer wraps it in
+    # ('{"counter":0,"name":"' + ... + '"}'), crosses the limit by exactly
+    # 23 bytes -- asserted exactly, not just "some error", per this repo's
+    # exact-match assert policy.
     huge_name = "x" * MAX_PAYLOAD_BYTES
     with pytest.raises(ValueError) as excinfo:
         encode_answer(huge_name, 0)
-    assert "exceeds cefpyco's" in str(excinfo.value)
+    encoded_len = MAX_PAYLOAD_BYTES + 23
+    assert str(excinfo.value) == (
+        f"encoded answer is {encoded_len} bytes, "
+        f"exceeds cefpyco's {MAX_PAYLOAD_BYTES}-byte payload buffer"
+    )
 
 
 def test_decode_rejects_non_json_payload():
     with pytest.raises(ValueError) as excinfo:
         decode_answer(b"not json")
-    assert "not a valid semindex_smoke answer" in str(excinfo.value)
+    assert str(excinfo.value) == "payload is not a valid semindex_smoke answer: b'not json'"
 
 
 def test_decode_rejects_missing_field():
     with pytest.raises(ValueError) as excinfo:
         decode_answer(b'{"name": "ccnx:/a"}')
-    assert "not a valid semindex_smoke answer" in str(excinfo.value)
+    assert str(excinfo.value) == (
+        'payload is not a valid semindex_smoke answer: b\'{"name": "ccnx:/a"}\''
+    )
 
 
 def test_decode_rejects_wrong_field_type():
     with pytest.raises(ValueError) as excinfo:
         decode_answer(b'{"name": "ccnx:/a", "counter": "7"}')
-    assert "wrong field types" in str(excinfo.value)
+    assert str(excinfo.value) == (
+        'payload has wrong field types: b\'{"name": "ccnx:/a", "counter": "7"}\''
+    )
 
 
 def test_is_fresh_first_counter_has_no_predecessor():

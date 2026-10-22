@@ -1,16 +1,19 @@
 # semindex_smoke RUNBOOK
 
-Ticket 01's acceptance criteria (`docs/wayfinder/semantic-index/tickets/01-cefpyco-build-and-smoke.md`)
-need a running `cefnetd` (and, for item 5 and the CS_MODE=2 half of items
+Ticket 01's acceptance criteria (the semindex effort's
+`docs/wayfinder/semantic-index/tickets/01-cefpyco-build-and-smoke.md`, in
+the `cefore-semindex` repo, not this one) need a running `cefnetd` (and,
+for item 5 and the CS_MODE=2 half of items
 1-4, `csmgrd`). Both need root (Mininet-less here, but `cefnetdstart` still
 wants to manage a UNIX domain socket and PID files under paths it does not
 own). The commands below are written for the **orchestrator** to run; the
 worker that wrote this RUNBOOK did not and could not run them.
 
-All five commands below are **root**. The `semindex_smoke/*.py` scripts
-themselves only need root insofar as they must reach a UNIX socket that
-`cefnetdstart` created as root (see "Socket permissions" below) -- they do
-not touch Mininet or any other root-only subsystem themselves.
+Every command below that starts or stops a daemon, or runs a
+`semindex_smoke/*.py` script, is **root**. The scripts themselves only need
+root insofar as they must reach a UNIX socket that `cefnetdstart` created as
+root (see "Socket permissions" below) -- they do not touch Mininet or any
+other root-only subsystem themselves.
 
 ## Why a temporary conf dir, not `/usr/local/cefore`
 
@@ -49,18 +52,29 @@ cefnetd they mean.
 UNIX domain socket; `LOCAL_SOCK_ID` defaults to `0`, so normally
 `/tmp/cef_9695.0`) and owns it. The `semindex_smoke/*.py` scripts need to
 `connect()` to that socket, so **run them with the same `sudo` as the
-daemons**, not as an unprivileged user -- this worker could not verify the
-socket's permissions (no root), so check before assuming either way:
+daemons**, not as an unprivileged user, as they already do in Mode A/B
+below. This worker could not verify the socket's permissions (no root), so
+check before assuming either way:
 
 ```bash
-# ORCHESTRATOR: sanity check before running any smoke script
-ls -l /tmp/cef_9695.0 /tmp/csmgr_9799.0 2>&1
+# ORCHESTRATOR: before starting anything -- Mininet hosts share /tmp, so a
+# cefnetd left running from another scenario on this same host would
+# collide with the smoke test's own cefnetd (same /tmp/cef_9695.0 path,
+# same LOCAL_SOCK_ID default of 0). If pgrep finds one, stop it first or
+# pick a different PORT_NUM/LOCAL_SOCK_ID in $SMOKE_CONF/cefnetd.conf.
 pgrep -a cefnetd
 pgrep -a csmgrd
 ```
 
-If `ls -l` shows the socket is `root`-owned with no group/other write bit,
-the smoke scripts must run under `sudo` too (`sudo /home/lab_shared/cefore-semindex/.venv/bin/python3 semindex_smoke/producer.py ...`).
+```bash
+# ORCHESTRATOR: right after cefnetdstart in Mode A/B below (the socket does
+# not exist until cefnetdstart creates it), before running any smoke
+# script:
+ls -l /tmp/cef_9695.0
+```
+
+If that shows the socket is `root`-owned with no group/other write bit, the
+smoke scripts must run under `sudo` too.
 
 ## Mode A: CS_MODE=2 (csmgrd present) -- covers ticket items 1-5
 
@@ -72,10 +86,18 @@ sed -i 's/^CS_MODE=.*/CS_MODE=2/' "$SMOKE_CONF"/cefnetd.conf
 sudo csmgrdstart -d "$SMOKE_CONF"
 sudo cefnetdstart -d "$SMOKE_CONF"
 sleep 1
-sudo csmgrstatus -d "$SMOKE_CONF"   # confirm cefnetd can see csmgrd before anything else
+ls -l /tmp/cef_9695.0   # socket permissions check, see above
+# csmgrstatus has no -d/conf-dir option (reference skill: csmgrstatus
+# [uri] [-p port] [-h host]); it just proves csmgrd itself answers on its
+# default port. What we actually need here -- that THIS cefnetd sees
+# csmgrd -- is cefstatus's own "Cache Mode" line, which reads "External"
+# once CS_MODE=2 has connected to csmgrd and "None" otherwise
+# (src/cefnetd/cef_status.c; doc/Daemon.md).
+sudo csmgrstatus
+sudo cefstatus -d "$SMOKE_CONF" | grep "Cache Mode"   # expect "External"
 
-# item 1 + 2 + 3: start the producer in the background, registered under a
-# csmgrd-backed node's prefix
+# item 1 + 2 (csmgrd-backed half) + 3: start the producer in the
+# background, registered under this csmgrd-backed node's prefix
 sudo "$PY" semindex_smoke/producer.py \
     --prefix ccnx:/semidx/smoke/a --ceforedir "$SMOKE_CONF" \
     > /tmp/semindex-smoke-producer-a.log 2>&1 &
@@ -119,10 +141,12 @@ the consumer asks. Under CS_MODE=0 there is nowhere for a published chunk to
 live once `cefputfile` sends it, so leave `cefputfile`/`chunk_fetch.py` out
 of the CS_MODE=0 run below rather than expecting them to pass.
 
-## Mode B: CS_MODE=0 (no cache) -- covers ticket items 1-4 only
+## Mode B: CS_MODE=0 (no csmgrd) -- covers ticket items 1-4 only
 
-Same as Mode A but skip `csmgrdstart`/`csmgrstatus` and `cefputfile`/
-`chunk_fetch.py`, and flip the conf:
+This is the non-csmgrd half of item 2 (map.md's Fog item about whether a
+node with no Content Store still delivers an Interest to its registered
+app): same as Mode A but skip `csmgrdstart`/`csmgrstatus`/`cefstatus` and
+`cefputfile`/`chunk_fetch.py`, and flip the conf:
 
 ```bash
 # ORCHESTRATOR MUST RUN (root)
@@ -138,15 +162,16 @@ sudo cefnetdstop -d "$SMOKE_CONF"
 | Ticket item | Script | Pass | Fail |
 | --- | --- | --- | --- |
 | 1. `create_handle` binds to a node's cefnetd | all four | process starts, `register()`/`send_interest()` don't raise | exception on `create_handle`/`register` |
-| 2. app registered under a prefix receives a longer-name Interest | consumer.py | exit 0 with `name=... counter=...` printed | exit 3 (timeout) -- see "Fog" below |
+| 2. app registered under a prefix receives a longer-name Interest (csmgrd node: Mode A; non-csmgrd node: Mode B) | consumer.py | exit 0 with `name=... counter=...` printed | exit 3 (timeout) -- see "Fog" below |
 | 3. `send_data` (no chunk TLV) answers within `lifetime=2000` | consumer.py | exit 0 | exit 3 (timeout) or exit 1 (wrong/malformed answer) |
 | 4. state-style names are never answered with an older object | state_freshness.py | exit 0, `PASS: N requests, counters strictly increasing` | exit 1, with the specific request index and counters printed -- **per the ticket, this stops the effort** |
 | 5. `send_interest(chunk_num=k)` fetches all chunks of a cefputfile object | chunk_fetch.py | exit 0, `PASS: <n> chunks, <bytes> bytes match <file>` | exit 1, with the chunk number or first differing byte printed |
 
-Run Mode A once with the producer on the csmgrd-backed node (as above) and,
-when ticket 02's multi-host setup exists, once more with the producer on a
-node that has no csmgrd of its own (map.md's Fog item about whether a
-non-csmgrd node's registered app still receives Interests) -- see "Multi-host
+Run both Mode A and Mode B: together they are map.md's Fog question about
+whether a csmgrd node and a non-csmgrd node both deliver an Interest to a
+registered app, fully answered on a single host. What a single host cannot
+answer is the cross-link case -- the requester on a different cefnetd than
+the producer, reachable only through a FIB route -- see "Multi-host
 follow-up" below.
 
 ## Fog: what the C source says, not yet confirmed live
@@ -200,14 +225,11 @@ or re-run step 2 of this ticket's install (`uv pip install --python
 
 ## Multi-host follow-up (ticket 02, not done here)
 
-This RUNBOOK only covers a **single host, single cefnetd**. The
-`docs/wayfinder/semantic-index/tickets/01-...md` ticket's own "Task" section
-additionally asks for the same four checks on **ReCefore-provisioned
-Mininet hosts** with each node's real `cefnetd.conf`, specifically:
+This RUNBOOK only covers a **single host, single cefnetd**. Ticket 01's own
+"Task" section (in the `cefore-semindex` repo) additionally asks for the
+same four checks on **ReCefore-provisioned Mininet hosts** with each node's
+real `cefnetd.conf`, specifically:
 
-- producer on a csmgrd-backed node AND on a non-csmgrd node (map.md's Fog
-  question about whether both deliver to a registered app the same way);
-  the single-host run above can only exercise the csmgrd-backed case.
 - the requester on a *different* host than the producer, reachable only via
   FIB routes -- this needs ticket 04's `prefix_routes:` (map.md) to exist
   so Interests actually cross a link instead of staying on one cefnetd.
