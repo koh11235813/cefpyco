@@ -9,6 +9,15 @@ wants to manage a UNIX domain socket and PID files under paths it does not
 own). The commands below are written for the **orchestrator** to run; the
 worker that wrote this RUNBOOK did not and could not run them.
 
+**This RUNBOOK's single-host procedure (Modes A and B) is a preliminary
+check only, not the ticket's acceptance evidence.** The ticket's own "Task"
+section requires 1-5 proven on **ReCefore-provisioned Mininet hosts**, with
+separate requester/producer cefnetd daemons and both a cache and a
+non-cache node -- a single `cefnetd` on one host cannot show that
+`create_handle(ceforedir=...)` actually picks among distinct daemons, or
+that an Interest crosses a FIB route between them. See "Multi-host
+follow-up" below for exactly what that needs and why it is not done here.
+
 Every command below that starts or stops a daemon, or runs a
 `semindex_smoke/*.py` script, is **root**. The scripts themselves only need
 root insofar as they must reach a UNIX socket that `cefnetdstart` created as
@@ -76,12 +85,41 @@ ls -l /tmp/cef_9695.0
 If that shows the socket is `root`-owned with no group/other write bit, the
 smoke scripts must run under `sudo` too.
 
-## Mode A: CS_MODE=2 (csmgrd present) -- covers ticket items 1-5
+## Mode A: CS_MODE=2 (csmgrd present) -- single-host preliminary check for items 1-5
+
+Run this block as a **script** (e.g. `bash mode_a.sh`), not pasted line by
+line into an interactive shell: it relies on `trap ... EXIT` and `exit` to
+stop and clean up the moment item 2 or 4 fails, per the ticket's acceptance
+criteria (a negative result on either one stops the effort). Pasted into an
+interactive shell, `exit` would instead close that shell.
+
+Run it as `bash mode_a.sh`, **not** `sudo bash mode_a.sh`, and from the same
+shell where the setup block above exported `$SMOKE_CONF`: `sudo` defaults to
+`env_reset`, which would drop `$SMOKE_CONF` from the script's environment
+entirely (every `-d "$SMOKE_CONF"` below would silently become `-d ""`).
+Every privileged line inside the block already carries its own `sudo`, so
+no outer one is needed.
 
 ```bash
 # ORCHESTRATOR MUST RUN (root), from /home/lab_shared/cefpyco
 PY=/home/lab_shared/cefore-semindex/.venv/bin/python3
 sed -i 's/^CS_MODE=.*/CS_MODE=2/' "$SMOKE_CONF"/cefnetd.conf
+
+# Runs on every exit from this script -- success, an explicit `exit` below
+# on a failed item 2/4, or an interrupted orchestrator -- so a stopped
+# effort never leaves cefnetd/csmgrd or a background producer/cefputfile
+# running behind it. PRODUCER_PID/CEFPUTFILE_PID are cleared once each is
+# stopped on its own success path, so cleanup() does not try to kill an
+# already-dead PID.
+PRODUCER_PID=""
+CEFPUTFILE_PID=""
+cleanup() {
+    [ -n "$PRODUCER_PID" ] && sudo kill "$PRODUCER_PID" 2>/dev/null
+    [ -n "$CEFPUTFILE_PID" ] && sudo kill "$CEFPUTFILE_PID" 2>/dev/null
+    sudo cefnetdstop -d "$SMOKE_CONF" 2>/dev/null
+    sudo csmgrdstop -d "$SMOKE_CONF" 2>/dev/null
+}
+trap cleanup EXIT
 
 sudo csmgrdstart -d "$SMOKE_CONF"
 sudo cefnetdstart -d "$SMOKE_CONF"
@@ -107,15 +145,26 @@ sleep 1   # let register() land before the first Interest
 # item 2 + 3: a longer name under the registered prefix must be answered
 sudo "$PY" semindex_smoke/consumer.py \
     ccnx:/semidx/smoke/a/hello --ceforedir "$SMOKE_CONF"
-echo "consumer exit: $?"   # 0 = PASS (items 2 and 3 both hold)
+CONSUMER_EXIT=$?
+echo "consumer exit: $CONSUMER_EXIT"   # 0 = PASS (items 2 and 3 both hold)
+if [ "$CONSUMER_EXIT" -ne 0 ]; then
+    echo "[RUNBOOK] item 2/3 FAILED -- stopping per the ticket's acceptance criteria" >&2
+    exit "$CONSUMER_EXIT"   # trap above still runs cleanup()
+fi
 
 # item 4: N requests with per-request names, counters must never repeat
 sudo "$PY" semindex_smoke/state_freshness.py \
     --prefix ccnx:/semidx/smoke/a --ceforedir "$SMOKE_CONF" --count 20
-echo "state_freshness exit: $?"   # 0 = PASS; per the ticket, non-zero STOPS the effort
+FRESHNESS_EXIT=$?
+echo "state_freshness exit: $FRESHNESS_EXIT"   # 0 = PASS
+if [ "$FRESHNESS_EXIT" -ne 0 ]; then
+    echo "[RUNBOOK] item 4 FAILED -- stopping per the ticket's acceptance criteria" >&2
+    exit "$FRESHNESS_EXIT"
+fi
 
 sudo kill "$PRODUCER_PID"
 wait "$PRODUCER_PID" 2>/dev/null
+PRODUCER_PID=""   # already stopped; don't let cleanup() try to kill it again
 
 # item 5: publish a multi-chunk file with cefputfile, then fetch it back
 # chunk by chunk. Any file bigger than one block_size (default 1024 B) is
@@ -127,11 +176,12 @@ CEFPUTFILE_PID=$!
 sleep 1   # let the first Content Objects land in csmgrd's cache before asking for them
 sudo "$PY" semindex_smoke/chunk_fetch.py \
     ccnx:/semidx/smoke/file /tmp/semindex-smoke-src.bin --ceforedir "$SMOKE_CONF"
-echo "chunk_fetch exit: $?"   # 0 = PASS (item 5)
+CHUNK_FETCH_EXIT=$?
+echo "chunk_fetch exit: $CHUNK_FETCH_EXIT"   # 0 = PASS (item 5)
 sudo kill "$CEFPUTFILE_PID" 2>/dev/null
+CEFPUTFILE_PID=""
 
-sudo cefnetdstop -d "$SMOKE_CONF"
-sudo csmgrdstop -d "$SMOKE_CONF"
+exit "$CHUNK_FETCH_EXIT"   # trap above runs cleanup() on the way out either way
 ```
 
 Item 5 only makes sense under CS_MODE=2 (or CS_MODE=1): `chunk_fetch.py`
@@ -141,20 +191,37 @@ the consumer asks. Under CS_MODE=0 there is nowhere for a published chunk to
 live once `cefputfile` sends it, so leave `cefputfile`/`chunk_fetch.py` out
 of the CS_MODE=0 run below rather than expecting them to pass.
 
-## Mode B: CS_MODE=0 (no csmgrd) -- covers ticket items 1-4 only
+## Mode B: CS_MODE=0 (no csmgrd) -- single-host preliminary check for items 1-4
 
 This is the non-csmgrd half of item 2 (map.md's Fog item about whether a
 node with no Content Store still delivers an Interest to its registered
 app): same as Mode A but skip `csmgrdstart`/`csmgrstatus`/`cefstatus` and
-`cefputfile`/`chunk_fetch.py`, and flip the conf:
+`cefputfile`/`chunk_fetch.py`, and flip the conf. Run this as `bash
+mode_b.sh` too, for the same reasons as Mode A (the `trap`/`exit` stop
+guards need an unreset environment, and need a real shell rather than
+being pasted statement by statement): the producer/consumer/state_freshness
+sequence is identical, including the same `trap cleanup EXIT` and the same
+`exit` on a failed item 2 or 4 -- substitute it in place of the comment
+below rather than skipping the stop-on-failure guards because this mode's
+own snippet looks shorter:
 
 ```bash
 # ORCHESTRATOR MUST RUN (root)
 sed -i 's/^CS_MODE=.*/CS_MODE=0/' "$SMOKE_CONF"/cefnetd.conf
+
+PRODUCER_PID=""
+cleanup() {
+    [ -n "$PRODUCER_PID" ] && sudo kill "$PRODUCER_PID" 2>/dev/null
+    sudo cefnetdstop -d "$SMOKE_CONF" 2>/dev/null
+}
+trap cleanup EXIT
+
 sudo cefnetdstart -d "$SMOKE_CONF"
 sleep 1
-# ... producer.py / consumer.py / state_freshness.py exactly as in Mode A ...
-sudo cefnetdstop -d "$SMOKE_CONF"
+# ... producer.py / consumer.py / state_freshness.py exactly as in Mode A,
+# including the CONSUMER_EXIT/FRESHNESS_EXIT checks and their `exit` on
+# failure (there is no CEFPUTFILE_PID or item 5 in this mode) ...
+exit 0   # trap above runs cleanup() on the way out either way
 ```
 
 ## How to read the result
@@ -163,7 +230,7 @@ sudo cefnetdstop -d "$SMOKE_CONF"
 | --- | --- | --- | --- |
 | 1. `create_handle` binds to a node's cefnetd | all four | process starts, `register()`/`send_interest()` don't raise | exception on `create_handle`/`register` |
 | 2. app registered under a prefix receives a longer-name Interest (csmgrd node: Mode A; non-csmgrd node: Mode B) | consumer.py | exit 0 with `name=... counter=...` printed | exit 3 (timeout) -- see "Fog" below |
-| 3. `send_data` (no chunk TLV) answers within `lifetime=2000` | consumer.py | exit 0 | exit 3 (timeout) or exit 1 (wrong/malformed answer) |
+| 3. `send_data` (no chunk TLV) answers within `lifetime=2000` | consumer.py | exit 0 | exit 3 (timeout), exit 4 (Data arrived after the lifetime), or exit 1 (wrong/malformed/chunked answer) |
 | 4. state-style names are never answered with an older object | state_freshness.py | exit 0, `PASS: N requests, counters strictly increasing` | exit 1, with the specific request index and counters printed -- **per the ticket, this stops the effort** |
 | 5. `send_interest(chunk_num=k)` fetches all chunks of a cefputfile object | chunk_fetch.py | exit 0, `PASS: <n> chunks, <bytes> bytes match <file>` | exit 1, with the chunk number or first differing byte printed |
 
@@ -223,12 +290,16 @@ or re-run step 2 of this ticket's install (`uv pip install --python
 .../.venv/bin/python3 dist/cefpyco-0.10.1.0-py3-none-any.whl`) after any
 `uv sync`.
 
-## Multi-host follow-up (ticket 02, not done here)
+## Multi-host follow-up: REQUIRED before ticket 01 can be marked done
 
-This RUNBOOK only covers a **single host, single cefnetd**. Ticket 01's own
-"Task" section (in the `cefore-semindex` repo) additionally asks for the
-same four checks on **ReCefore-provisioned Mininet hosts** with each node's
-real `cefnetd.conf`, specifically:
+This RUNBOOK only covers a **single host, single cefnetd**, as a
+preliminary check -- it does **not** satisfy ticket 01's acceptance
+criteria by itself. Ticket 01's own "Task" section (in the
+`cefore-semindex` repo) requires the same checks 1-5 on
+**ReCefore-provisioned Mininet hosts**, each using its own real
+`cefnetd.conf`, covering both a cache and a non-cache node and separate
+requester/producer daemons, with the complete command output recorded.
+Specifically still needed:
 
 - the requester on a *different* host than the producer, reachable only via
   FIB routes -- this needs ticket 04's `prefix_routes:` (map.md) to exist
@@ -242,4 +313,6 @@ real `cefnetd.conf`, specifically:
 
 None of that is attempted here: it needs ticket 02's `host_apps` plumbing,
 which does not exist yet, and real Mininet/root, which this worker does not
-have.
+have. Whoever picks this up next should treat the single-host Mode A/B run
+above as a quick sanity check before spending Mininet time, not as a
+substitute for it.
