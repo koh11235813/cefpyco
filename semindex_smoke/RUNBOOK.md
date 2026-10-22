@@ -169,17 +169,30 @@ if [ "$FRESHNESS_EXIT" -ne 0 ]; then
     exit "$FRESHNESS_EXIT"
 fi
 
-# observation, not pass/fail: does cefnetd's own Content Store answer a
-# repeat request for the exact same name itself, even with cache_time=0,
-# as long as it is still within expiry? Ask for the same name twice and
-# then read the producer's own log -- if the producer only logged one
-# "answered ... counter=N" line for this name, the second request never
-# reached it. On 2026-10-22 (this exact sequence, CS_MODE=2, expiry=1000,
-# cache_time=0) the producer logged exactly one "answered
-# ccnx:/semidx/smoke/a/same counter=2" line while both consumer
-# invocations exited: the Content Store answered the second request
-# itself, within the 1s expiry, despite cache_time=0 recommending against
-# caching it.
+# observation, not pass/fail: does the Content Store (csmgrd, in this
+# CS_MODE=2 mode) answer a repeat request for the exact same name itself,
+# even with cache_time=0, as long as it is still within expiry? Ask for
+# the same name twice and then read the producer's own log -- if the
+# producer only logged one "answered ... counter=N" line for this name,
+# the second request never reached it.
+#
+# Expected post-fix (item 1's chunk_num_f fix applied): both consumer
+# invocations exit 0 and print the SAME "name=... counter=N" (the second
+# request's Data is the Content Store's cached copy of the first
+# request's answer, not a fresh one from the producer), and the producer
+# log shows exactly one "answered ccnx:/semidx/smoke/a/same counter=N"
+# line for this name.
+#
+# What was actually observed on 2026-10-22 (same sequence, CS_MODE=2,
+# expiry=1000, cache_time=0, but BEFORE item 1's fix): the producer log
+# already showed the expected single "answered
+# ccnx:/semidx/smoke/a/same counter=2" line -- confirming the Content
+# Store answered the second request itself, within the 1s expiry,
+# despite cache_time=0 recommending against caching it -- but both
+# consumer invocations exited 1 (`answer carries chunk_num=0, expected no
+# chunk TLV`), because of the then-unfixed chunk_num bug, not because of
+# anything about this observation. Re-run this step to confirm the
+# post-fix expectation above now actually holds.
 sudo "$PY" semindex_smoke/consumer.py \
     ccnx:/semidx/smoke/a/same --ceforedir "$SMOKE_CONF"
 echo "same-name consumer #1 exit: $?"
@@ -291,6 +304,37 @@ something to hold a published chunk between `cefputfile` and
 `chunk_fetch.py` (see above), and the same-name-twice observation is
 specifically about whether a Content Store answers a repeat request --
 there is none in CS_MODE=0 to ask that question of.
+
+## Confirming this round's fixes live
+
+This round changed two things Mode A/B's own pass/fail output cannot show
+by itself: item 1 (chunk_num_f) is covered by consumer.py/state_freshness.py
+simply passing instead of failing with `chunk_num=0`, but item 2
+(`receive()`'s timeout accuracy) needs its own check -- the 0.059s Mode A
+run on 2026-10-22 only measured the time-to-first-Data case, which was
+already fast before the fix; the slow case was always the no-data-yet
+poll, and the old and new code both total close to the same wall-clock
+time on a 2000ms-class timeout (2-3 whole-second polls either way). A
+short timeout is where the fix actually shows:
+
+```bash
+# ORCHESTRATOR MUST RUN (root), with cefnetd already up at $SMOKE_CONF
+# (e.g. right after `sudo cefnetdstart -d "$SMOKE_CONF"` in Mode A/B above)
+sudo "$PY" -c "
+import cefpyco, time
+with cefpyco.create_handle(ceforedir='$SMOKE_CONF') as h:
+    start = time.monotonic()
+    h.receive(timeout_ms=100)
+    print(f'{time.monotonic() - start:.2f}s')
+"
+# Expect ~0.10s (was ~1.00s before this round's fix to wait_receive()).
+```
+
+Then re-run Mode A and Mode B in full: expect consumer.py exit 0 on the
+`.../hello` request, state_freshness.py's `PASS: 20 requests, counters
+strictly increasing`, the same-name-twice observation matching "Expected
+post-fix" above, and (Mode A only) chunk_fetch.py's `PASS: ... bytes
+match ...`.
 
 ## How to read the result
 
