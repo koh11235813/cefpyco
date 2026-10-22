@@ -1,12 +1,11 @@
 """Wire-format helpers shared by the semindex_smoke producer/consumer/state_freshness scripts.
 
 These scripts talk to each other over bare cefpyco send_data()/send_interest()
-calls with no chunk TLV (ticket 01, smoke tests a-c). Both the producer side
-and every consumer side need to agree on how the producer's per-Interest
-counter and the Interest name it is answering get packed into the Content
-Object payload. This module is the single place that agreement is written
-down, so producer.py and consumer.py/state_freshness.py cannot drift apart
-on the wire format by editing one script and forgetting the other.
+calls with no chunk TLV. The answering side and every receiving side need to
+agree on how the per-Interest counter and the Interest name being answered
+get packed into the Content Object payload. This module is the single place
+that agreement is written down, so the answering side and a receiving side
+cannot drift apart on the wire format by editing one without the other.
 """
 
 from __future__ import annotations
@@ -59,6 +58,10 @@ def decode_answer(payload: bytes) -> tuple[str, int]:
         counter = obj["counter"]
     except Exception as exc:
         raise ValueError(f"payload is not a valid semindex_smoke answer: {payload!r}") from exc
-    if not isinstance(name, str) or not isinstance(counter, int):
+    # 2026-10-22 fix: isinstance(counter, int) accepted JSON booleans (bool
+    # is a subclass of int in Python), so a payload of {"counter": true}
+    # previously passed as a valid counter value. type(counter) is int
+    # excludes bool explicitly.
+    if not isinstance(name, str) or type(counter) is not int:
         raise ValueError(f"payload has wrong field types: {payload!r}")
     return name, counter

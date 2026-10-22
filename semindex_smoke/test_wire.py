@@ -1,19 +1,23 @@
 """Unit tests for the pure logic in semindex_smoke: no cefnetd, no root required.
 
-These cover the parts of the ticket's smoke scripts that do not depend on a
-running cefnetd: the wire format producer/consumer agree on (wire.py), the
-strictly-increasing counter check state_freshness.py relies on, and the
-byte-diff helper chunk_fetch.py uses to report a mismatch. The cefnetd-facing
-parts of producer.py/consumer.py/chunk_fetch.py are exercised by
-RUNBOOK.md's single-host scenario, which needs root and is not run here.
+These cover the parts of the smoke scripts that do not depend on a running
+cefnetd: the wire format the answering and receiving sides agree on
+(wire.py), the strictly-increasing counter check and request-count
+validation state_freshness.py enforces, and the byte-diff helper
+chunk_fetch.py uses to report a mismatch. The cefnetd-facing receive loops
+are exercised by RUNBOOK.md's single-host scenario (needs root, not run
+here) and, for their pure accept/reject logic, by test_receive_guards.py's
+fake-handle tests.
 
 Run with: .venv/bin/python3 -m pytest semindex_smoke/test_wire.py -v
 """
 
+import argparse
+
 import pytest
 
 from chunk_fetch import first_difference
-from state_freshness import is_fresh, request_name
+from state_freshness import _positive_int, is_fresh, request_name
 from wire import MAX_PAYLOAD_BYTES, decode_answer, encode_answer
 
 
@@ -60,6 +64,23 @@ def test_decode_rejects_wrong_field_type():
     assert str(excinfo.value) == (
         'payload has wrong field types: b\'{"name": "ccnx:/a", "counter": "7"}\''
     )
+
+
+def test_decode_rejects_boolean_counter_true():
+    # bool is a subclass of int in Python, so a naive isinstance(counter,
+    # int) check would accept this. JSON's `true`/`false` must not pass as
+    # a valid counter value.
+    payload = b'{"name": "ccnx:/a", "counter": true}'
+    with pytest.raises(ValueError) as excinfo:
+        decode_answer(payload)
+    assert str(excinfo.value) == f"payload has wrong field types: {payload!r}"
+
+
+def test_decode_rejects_boolean_counter_false():
+    payload = b'{"name": "ccnx:/a", "counter": false}'
+    with pytest.raises(ValueError) as excinfo:
+        decode_answer(payload)
+    assert str(excinfo.value) == f"payload has wrong field types: {payload!r}"
 
 
 def test_is_fresh_first_counter_has_no_predecessor():
@@ -111,3 +132,19 @@ def test_first_difference_at_start():
 
 def test_first_difference_one_is_prefix_of_other():
     assert first_difference(b"ab", b"abc") == 2
+
+
+def test_positive_int_accepts_one():
+    assert _positive_int("1") == 1
+
+
+def test_positive_int_rejects_zero():
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+        _positive_int("0")
+    assert str(excinfo.value) == "--count must be a positive integer, got '0'"
+
+
+def test_positive_int_rejects_negative():
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+        _positive_int("-1")
+    assert str(excinfo.value) == "--count must be a positive integer, got '-1'"

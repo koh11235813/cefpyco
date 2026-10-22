@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """semindex_smoke producer: answer every Interest under a registered prefix.
 
-Ticket 01 smoke test (a): register(prefix), then loop receive(timeout_ms=100)
-and answer each Interest with send_data (no chunk TLV, chunk_num=-1) whose
-payload echoes the Interest's own name plus a counter. The counter increases
-by one for every Interest answered, regardless of name -- state_freshness.py
-relies on it never going backwards or repeating across the whole run.
+register(prefix), then loop receive(timeout_ms=100) and answer each Interest
+with send_data (no chunk TLV, chunk_num=-1) whose payload echoes the
+Interest's own name plus a counter. The counter increases by one for every
+Interest answered, regardless of name, and must never go backwards or repeat
+across the whole run -- it is the signal a receiver uses to detect a stale
+or replayed answer.
 
 This is meant to run as a long-lived process for the duration of a RUNBOOK
 scenario; stop it with SIGINT/SIGTERM.

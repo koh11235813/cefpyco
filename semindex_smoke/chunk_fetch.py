@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """semindex_smoke chunk_fetch: fetch every chunk of a cefputfile-published object and verify it.
 
-Ticket 01 smoke test (d): fetch chunks 0..end of a content object published
-with cefputfile, one chunk at a time via send_interest(chunk_num=k), and
-compare the reassembled bytes against the original source file byte for
-byte.
+Fetches chunks 0..end of a content object published with cefputfile, one
+chunk at a time via send_interest(chunk_num=k), and compares the reassembled
+bytes against the original source file byte for byte.
 
 end_chunk_num is reported only on the LAST chunk cefputfile emits: its main
 loop (tools/cefputfile/cefputfile.c) sets end_chunk_num_f only when the
