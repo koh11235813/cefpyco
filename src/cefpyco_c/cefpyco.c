@@ -333,9 +333,9 @@ static void set_timespec(struct timespec* ts, long nano_sec) {
         error_on_timeout - whether running out of time without data is an error (-1)
                            or a plain "nothing arrived" (0).
     Returns:
-        the number of bytes read (>0) on success, -1 or 0 per error_on_timeout on
-        timeout, or a negative errno-derived value from cef_client_read_core() on a
-        socket error.
+        the number of bytes read (>0) on success, or -1 or 0 per error_on_timeout on
+        a timeout or a socket read error -- cef_client_read_core()'s own negative
+        return (an EOF/error indication) is never passed through to the caller.
 ----------------------------------------------------------------------------------------*/
 static int wait_receive(CefT_Client_Handle handler, int timeout_ms, int error_on_timeout) {
     MILESTONE
@@ -394,6 +394,26 @@ static int wait_receive(CefT_Client_Handle handler, int timeout_ms, int error_on
         res = cef_client_read_core(handler, buf, CefpycoC_Buffer_Size, poll_ms);
         Py_END_ALLOW_THREADS;
         if (res > 0) break;
+        if (res < 0) {
+            /* 2026-10-22 fix: poll() reports POLLERR/POLLHUP on an already-dead
+             * socket (e.g. cefnetd stopped mid-receive()) immediately, without
+             * waiting out the poll_ms argument, so a closed connection would
+             * otherwise make this loop spin at full CPU on the elapsed_ms check
+             * above for the rest of timeout_ms instead of returning promptly.
+             * Map it to the same -1/0 result the timeout branch above returns
+             * (cef_client_read_core()'s own negative value is never passed
+             * through, same as before this round's change) rather than looping
+             * to the deadline to get there.
+             */
+            if (error_on_timeout) {
+                if (cefpyco_enable_log) {
+                    cef_log_write(
+                        CefC_Log_Info, "\033[101m*** [CAUTION] Stop to wait. ***\033[0m\n");
+                }
+                return -1;
+            }
+            return 0;
+        }
     }
     return res;
 }
