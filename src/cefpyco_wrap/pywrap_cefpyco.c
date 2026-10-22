@@ -333,7 +333,17 @@ static int call_register_route(PyObject* args, PyObject* kw, cefpyco_reg_api api
     if (!PyArg_ParseTupleAndKeywords(args, kw, "Ls|i", keywords, &handler, &uri)) {
         return -2;
     }
-    res = api((CefT_Client_Handle)handler, CefC_Route_Add, uri);
+    // 2026-10-22 v0.12.0 build fix: `CefC_Route_Add` is undefined in Cefore
+    // v0.12.0's headers (and in every tagged Cefore release checked,
+    // v0.6.2..v0.12.0 -- `git log --all -S'CefC_Route_Add'` in the cefore
+    // tree has no hits), so this call site cannot compile against any
+    // released Cefore. cef_client_prefix_route() itself and its "add route"
+    // opcode are new in v0.12.0: the opcode is CefC_T_OPT_ROUTE_ADD
+    // (cef_frame.h), per cef_client.h's own comment on
+    // cef_client_prefix_route's `func` parameter. This cefpyco wrapper was
+    // evidently written against a pre-release name for that same opcode;
+    // retarget it to the symbol v0.12.0 actually ships.
+    res = api((CefT_Client_Handle)handler, CefC_T_OPT_ROUTE_ADD, uri);
     if (res < 0) return -1;
     return 0;
 }
