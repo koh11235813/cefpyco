@@ -89,8 +89,8 @@ def test_wait_for_answer_accepts_data_within_lifetime(monkeypatch):
 
 def test_wait_for_answer_rejects_data_after_lifetime(monkeypatch):
     # A reply at simulated 2.5s is inside the 1.0s late-poll margin (so it
-    # is observed at all) but past the 2000ms lifetime the ticket requires
-    # -- this must not be scored as a pass.
+    # is observed at all) but past the 2000ms lifetime the probe must be
+    # answered within -- this must not be scored as a pass.
     clock = _FakeClock()
     monkeypatch.setattr(consumer.time, "monotonic", lambda: clock.now)
     name = "ccnx:/semidx/smoke/a/hello"

@@ -92,8 +92,8 @@ def test_is_fresh_strictly_increasing_passes():
 
 
 def test_is_fresh_repeat_fails():
-    # The exact case the ticket calls out: "never a repeat of an older
-    # answer". A repeat is the same counter, not just a smaller one.
+    # A repeat is the same counter, not just a smaller one -- this is the
+    # case this check exists for.
     assert is_fresh(4, 4) is False
 
 
