@@ -41,6 +41,18 @@
 static int is_not_ccnx_1_0_content_packet(unsigned char* buf, int len);
 static int is_not_targeted_header(struct cef_app_frame* wrk_frame);
 
+/*--------------------------------------------------------------------------------------
+        Converts one Data frame already parsed by Cefore's
+        cef_client_payload_get_with_info() (struct cef_app_frame, in info->wrk_frame)
+        into cefpyco's own cefpyco_app_frame, the shape the Python wrapper reads.
+    Parameters:
+        info      - cefpyco's running parse state; owns the raw buffer and scratch
+                    struct cef_app_frame that cef_client_payload_get_with_info() fills.
+        app_frame - destination frame handed back to pywrap_cefpyco.c.
+    Returns:
+        the number of bytes of info->buf this frame consumed, 0 if the leading bytes
+        are not a CCNx 1.0 Data frame cefpyco targets, or -1 on a truncated buffer.
+----------------------------------------------------------------------------------------*/
 int cpcparse_try_parse_app_frame_7_5(cpcparse_parse_info* info, cefpyco_app_frame* app_frame) {
     int                   res;
     int                   actual_len;
@@ -64,7 +76,20 @@ int cpcparse_try_parse_app_frame_7_5(cpcparse_parse_info* info, cefpyco_app_fram
     app_frame->actual_data_len = actual_len;
     app_frame->name = wrk_buf->name;
     app_frame->name_len = wrk_buf->name_len;
-    app_frame->chunk_num = wrk_buf->chunk_num;
+    /* 2026-10-22 fix: observed live on the ticket-01 smoke run -- a Data sent with
+     * send_data(chunk_num=-1) (no chunk TLV) was handed to the consumer as
+     * chunk_num=0, indistinguishable from an actual chunk 0. wrk_buf->chunk_num is 0
+     * in both cases; only wrk_buf->chunk_num_f (set by Cefore's
+     * cef_client_payload_get_with_info()) records whether the chunk TLV was present.
+     * Branch on chunk_num_f so "absent" survives as the -1 sentinel core.py:151
+     * already maps to None -- the same convention cpc_client_request_get_with_info()
+     * uses for the Interest side (cpcparse_tlv.c).
+     */
+    if (wrk_buf->chunk_num_f) {
+        app_frame->chunk_num = wrk_buf->chunk_num;
+    } else {
+        app_frame->chunk_num = -1;
+    }
     app_frame->end_chunk_num = wrk_buf->end_chunk_num;
     app_frame->payload = wrk_buf->payload;
     app_frame->payload_len = wrk_buf->payload_len;
