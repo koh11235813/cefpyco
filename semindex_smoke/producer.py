@@ -75,6 +75,7 @@ def run(args: argparse.Namespace) -> int:
     stop = {"flag": False}
 
     def _request_stop(_signum: int, _frame: FrameType | None) -> None:
+        """Signal handler for SIGTERM/SIGINT: request a stop without raising."""
         # Set a flag rather than raising: the current receive()/send_data()
         # call is allowed to finish first, so SIGTERM can't land mid-call
         # across the Python/C boundary and leave cefpyco's handle in an

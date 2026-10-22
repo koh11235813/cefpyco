@@ -32,6 +32,7 @@ class _FakeClock:
     """
 
     def __init__(self) -> None:
+        """Start the fake clock at 0.0 simulated seconds."""
         self.now = 0.0
 
 
@@ -47,6 +48,7 @@ class _FakePacket:
         is_data: bool = False,
         is_interest_return: bool = False,
     ) -> None:
+        """Set every attribute these scripts read off a real CcnPacketInfo, defaulting to an empty/no-op packet."""
         self.name = name
         self.payload = payload
         self.chunk_num = chunk_num
@@ -64,12 +66,15 @@ class _HandleContext:
     """
 
     def __init__(self, handle) -> None:
+        """Remember `handle` to hand back from `__enter__`."""
         self._handle = handle
 
     def __enter__(self):
+        """Return the wrapped fake handle, standing in for a real `with cefpyco.create_handle(...)`."""
         return self._handle
 
     def __exit__(self, *exc_info) -> None:
+        """No cleanup needed: the fake handle owns no real resource."""
         return None
 
 
@@ -82,6 +87,7 @@ class _NullHandle:
     """
 
     def send_interest(self, *args, **kwargs) -> None:
+        """Do nothing: this test drives behavior through a monkeypatched helper, not through send_interest()."""
         pass
 
 
@@ -97,6 +103,7 @@ class _FakeHandle:
     def __init__(
         self, clock: _FakeClock, answer: _FakePacket, arrival_s: float, poll_step_s: float = 0.1
     ) -> None:
+        """Remember the shared clock, the one canned answer, and when (simulated) it arrives."""
         self._clock = clock
         self._answer = answer
         self._arrival_s = arrival_s
@@ -104,6 +111,7 @@ class _FakeHandle:
         self._delivered = False
 
     def receive(self, timeout_ms: int) -> _FakePacket:
+        """Advance the fake clock by one poll step and deliver the canned answer once `arrival_s` is reached."""
         self._clock.now += self._poll_step_s
         if not self._delivered and self._clock.now >= self._arrival_s:
             self._delivered = True
@@ -168,10 +176,54 @@ def test_wait_for_answer_times_out_when_nothing_arrives(monkeypatch):
     )
 
 
+class _TimestampFakeHandle:
+    """A handle stand-in that only exercises when consumer.run() reads the clock relative to send_interest().
+
+    send_interest() itself advances the fake clock, standing in for the
+    measurable wall-clock time a real send_interest() call takes. If
+    run() read its start timestamp after calling send_interest() instead
+    of before, the timestamp a test captures from the (monkeypatched)
+    wait_for_answer() call would include this advance.
+    """
+
+    def __init__(self, clock: _FakeClock, advance_s: float) -> None:
+        """Remember the shared clock and how far send_interest() advances it."""
+        self._clock = clock
+        self._advance_s = advance_s
+
+    def send_interest(self, *args, **kwargs) -> None:
+        """Advance the fake clock, standing in for send_interest()'s own wall-clock cost."""
+        self._clock.now += self._advance_s
+
+
+def test_run_takes_send_time_before_send_interest(monkeypatch):
+    """consumer.run() must read its start timestamp before calling send_interest(), not after."""
+    clock = _FakeClock()
+    monkeypatch.setattr(consumer.time, "monotonic", lambda: clock.now)
+    handle = _TimestampFakeHandle(clock, advance_s=0.5)
+    monkeypatch.setattr(consumer.cefpyco, "create_handle", lambda **kwargs: _HandleContext(handle))
+
+    captured_send_time = []
+
+    def _fake_wait_for_answer(handle, name, lifetime_ms, send_time):
+        """Stand in for wait_for_answer(): record the send_time run() passed in and report EXIT_OK."""
+        captured_send_time.append(send_time)
+        return consumer.EXIT_OK
+
+    monkeypatch.setattr(consumer, "wait_for_answer", _fake_wait_for_answer)
+
+    args = consumer.parse_args(["ccnx:/semidx/smoke/a/hello", "--ceforedir", "/tmp"])
+    assert consumer.run(args) == consumer.EXIT_OK
+    # If run() took its timestamp after send_interest() instead of before,
+    # this would be 0.5 (the fake clock's advance), not 0.0.
+    assert captured_send_time == [0.0]
+
+
 # --- state_freshness.validate_answer(): shape and freshness gate ----------
 
 
 def test_validate_answer_accepts_fresh_chunkless_data():
+    """validate_answer() accepts a chunkless Data whose counter is fresh and whose name matches."""
     name = "ccnx:/semidx/g1/h0/sv/0/123"
     info = _FakePacket(name=name, payload=encode_answer(name, 5), is_data=True)
     ok, message, counter = validate_answer(info, name, last_counter=4)
@@ -179,6 +231,7 @@ def test_validate_answer_accepts_fresh_chunkless_data():
 
 
 def test_validate_answer_rejects_chunked_data():
+    """validate_answer() rejects a Data carrying a chunk_num, with its exact error message."""
     name = "ccnx:/semidx/g1/h0/sv/0/123"
     info = _FakePacket(name=name, payload=encode_answer(name, 5), chunk_num=0, is_data=True)
     ok, message, counter = validate_answer(info, name, last_counter=4)
@@ -187,6 +240,7 @@ def test_validate_answer_rejects_chunked_data():
 
 
 def test_validate_answer_rejects_non_fresh_counter():
+    """validate_answer() rejects a counter that repeats the last one seen, with its exact error message."""
     name = "ccnx:/semidx/g1/h0/sv/0/123"
     info = _FakePacket(name=name, payload=encode_answer(name, 4), is_data=True)
     ok, message, counter = validate_answer(info, name, last_counter=4)
@@ -250,15 +304,18 @@ class _ChunkFakeHandle:
     """
 
     def __init__(self, clock: _FakeClock, chunks: dict[int, bytes], end_chunk_num: int) -> None:
+        """Remember the shared clock, the canned chunk payloads by chunk_num, and which one is last."""
         self._clock = clock
         self._chunks = chunks
         self._end_chunk_num = end_chunk_num
         self._pending_chunk_num: int | None = None
 
     def send_interest(self, name: str, chunk_num: int, lifetime: int) -> None:
+        """Record which chunk_num the next receive() should answer."""
         self._pending_chunk_num = chunk_num
 
     def receive(self, timeout_ms: int) -> _FakePacket:
+        """Advance the fake clock and deliver the pending chunk's Data once, then no-ops until the next request."""
         self._clock.now += 0.1
         chunk_num = self._pending_chunk_num
         if chunk_num is None or chunk_num not in self._chunks:
