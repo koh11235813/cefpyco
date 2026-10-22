@@ -76,12 +76,12 @@ int cpcparse_try_parse_app_frame_7_5(cpcparse_parse_info* info, cefpyco_app_fram
     app_frame->actual_data_len = actual_len;
     app_frame->name = wrk_buf->name;
     app_frame->name_len = wrk_buf->name_len;
-    /* 2026-10-22 fix: observed live on the ticket-01 smoke run -- a Data sent with
+    /* 2026-10-22 fix: observed live on a single-host smoke run -- a Data sent with
      * send_data(chunk_num=-1) (no chunk TLV) was handed to the consumer as
      * chunk_num=0, indistinguishable from an actual chunk 0. wrk_buf->chunk_num is 0
      * in both cases; only wrk_buf->chunk_num_f (set by Cefore's
      * cef_client_payload_get_with_info()) records whether the chunk TLV was present.
-     * Branch on chunk_num_f so "absent" survives as the -1 sentinel core.py:151
+     * Branch on chunk_num_f so "absent" survives as the -1 sentinel the Python layer
      * already maps to None -- the same convention cpc_client_request_get_with_info()
      * uses for the Interest side (cpcparse_tlv.c).
      */
