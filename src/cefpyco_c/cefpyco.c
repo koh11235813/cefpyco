@@ -324,21 +324,60 @@ static void set_timespec(struct timespec* ts, long nano_sec) {
     ts->tv_nsec = nano_sec % one_sec_ns;
 }
 
+/*--------------------------------------------------------------------------------------
+        Blocks until a frame arrives on handler's socket, timeout_ms elapses, or (for
+        timeout_ms<=0) a single ~1s poll completes.
+    Parameters:
+        handler          - cefore client handle to read from.
+        timeout_ms       - how long to wait in total, in milliseconds.
+        error_on_timeout - whether running out of time without data is an error (-1)
+                           or a plain "nothing arrived" (0).
+    Returns:
+        the number of bytes read (>0) on success, -1 or 0 per error_on_timeout on
+        timeout, or a negative errno-derived value from cef_client_read_core() on a
+        socket error.
+----------------------------------------------------------------------------------------*/
 static int wait_receive(CefT_Client_Handle handler, int timeout_ms, int error_on_timeout) {
     MILESTONE
-    int res = 0;
-    int elapsedtime_ms = 0;
+    int             res = 0;
+    struct timespec start_ts, now_ts;
+    long            elapsed_ms;
+    int             poll_ms;
 
     if (handler < 1) return exit_with_error_msg(handler, "Handle must be created.");
     res = cpc_buf_remains();
     if (res) return res;
-    while (1) {
+
+    /* 2026-10-22 fix: cef_client_read() hardcodes a 1000ms poll per call
+     * (cef_client_read_core(..., 1000) since Cefore 0.8.2.2), so looping on it and
+     * adding 1000ms per iteration always rounds the real wait up to the next whole
+     * second -- receive(timeout_ms=100) measured ~1s on an idle socket instead of
+     * ~100ms. Call cef_client_read_core() directly with the actual time left so the
+     * poll (and thus the wait) matches timeout_ms. timeout_ms<=0 never had a defined
+     * meaning here (the old loop's arithmetic just happened to make it one ~1s poll,
+     * same as any timeout_ms<=1000); keep exactly that single ~1s poll for it so
+     * existing callers passing 0 or a negative value see no behavior change.
+     */
+    if (timeout_ms <= 0) {
         Py_BEGIN_ALLOW_THREADS;
-        res = cef_client_read(handler, buf, CefpycoC_Buffer_Size);  // It takes 1 sec at most.
+        res = cef_client_read_core(handler, buf, CefpycoC_Buffer_Size, 1000);
         Py_END_ALLOW_THREADS;
-        elapsedtime_ms += 1000;
-        if (res > 0) break;
-        if (elapsedtime_ms >= timeout_ms) {
+        if (res > 0) return res;
+        if (error_on_timeout) {
+            if (cefpyco_enable_log) {
+                cef_log_write(CefC_Log_Info, "\033[101m*** [CAUTION] Stop to wait. ***\033[0m\n");
+            }
+            return -1;
+        }
+        return 0;
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &start_ts);
+    while (1) {
+        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        elapsed_ms = (now_ts.tv_sec - start_ts.tv_sec) * 1000L +
+                     (now_ts.tv_nsec - start_ts.tv_nsec) / 1000000L;
+        if (elapsed_ms >= (long)timeout_ms) {
             if (error_on_timeout) {
                 if (cefpyco_enable_log) {
                     cef_log_write(
@@ -349,6 +388,12 @@ static int wait_receive(CefT_Client_Handle handler, int timeout_ms, int error_on
                 return 0;
             }
         }
+        poll_ms = (int)(timeout_ms - elapsed_ms);
+
+        Py_BEGIN_ALLOW_THREADS;
+        res = cef_client_read_core(handler, buf, CefpycoC_Buffer_Size, poll_ms);
+        Py_END_ALLOW_THREADS;
+        if (res > 0) break;
     }
     return res;
 }
