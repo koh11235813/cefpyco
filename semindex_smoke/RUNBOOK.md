@@ -128,16 +128,23 @@ ls -l /tmp/cef_9695.0   # socket permissions check, see above
 # csmgrstatus has no -d/conf-dir option (reference skill: csmgrstatus
 # [uri] [-p port] [-h host]); it just proves csmgrd itself answers on its
 # default port. What we actually need here -- that THIS cefnetd sees
-# csmgrd -- is cefstatus's own "Cache Mode" line, which reads "External"
+# csmgrd -- is cefstatus's own "Cache Mode" line, which reads "Excache"
 # once CS_MODE=2 has connected to csmgrd and "None" otherwise
-# (src/cefnetd/cef_status.c; doc/Daemon.md).
+# (src/cefnetd/cef_status.c's cache_type switch: None/Excache/Localcache/
+# Conpub -- confirmed 2026-10-22 against both the source and a live run;
+# an earlier draft of this RUNBOOK guessed "External", which cef_status.c
+# never emits).
 sudo csmgrstatus
-sudo cefstatus -d "$SMOKE_CONF" | grep "Cache Mode"   # expect "External"
+sudo cefstatus -d "$SMOKE_CONF" | grep "Cache Mode"   # expect "Excache"
 
 # item 1 + 2 (csmgrd-backed half) + 3: start the producer in the
-# background, registered under this csmgrd-backed node's prefix
+# background, registered under this csmgrd-backed node's prefix.
+# --expiry-ms 1000 --cache-time-ms 0: map.md's state-Data policy (expiry
+# 1s, cache_time 0) -- these probes are all state-style names, not the
+# long-lived record-style names map.md gives a 3600s/300s policy instead.
 sudo "$PY" semindex_smoke/producer.py \
     --prefix ccnx:/semidx/smoke/a --ceforedir "$SMOKE_CONF" \
+    --expiry-ms 1000 --cache-time-ms 0 \
     > /tmp/semindex-smoke-producer-a.log 2>&1 &
 PRODUCER_PID=$!
 sleep 1   # let register() land before the first Interest
@@ -162,9 +169,29 @@ if [ "$FRESHNESS_EXIT" -ne 0 ]; then
     exit "$FRESHNESS_EXIT"
 fi
 
+# observation, not pass/fail: does cefnetd's own Content Store answer a
+# repeat request for the exact same name itself, even with cache_time=0,
+# as long as it is still within expiry? Ask for the same name twice and
+# then read the producer's own log -- if the producer only logged one
+# "answered ... counter=N" line for this name, the second request never
+# reached it. On 2026-10-22 (this exact sequence, CS_MODE=2, expiry=1000,
+# cache_time=0) the producer logged exactly one "answered
+# ccnx:/semidx/smoke/a/same counter=2" line while both consumer
+# invocations exited: the Content Store answered the second request
+# itself, within the 1s expiry, despite cache_time=0 recommending against
+# caching it.
+sudo "$PY" semindex_smoke/consumer.py \
+    ccnx:/semidx/smoke/a/same --ceforedir "$SMOKE_CONF"
+echo "same-name consumer #1 exit: $?"
+sudo "$PY" semindex_smoke/consumer.py \
+    ccnx:/semidx/smoke/a/same --ceforedir "$SMOKE_CONF"
+echo "same-name consumer #2 exit: $?"
+
 sudo kill "$PRODUCER_PID"
 wait "$PRODUCER_PID" 2>/dev/null
 PRODUCER_PID=""   # already stopped; don't let cleanup() try to kill it again
+echo "--- producer log (check for one or two 'answered .../same counter=' lines)"
+cat /tmp/semindex-smoke-producer-a.log
 
 # item 5: publish a multi-chunk file with cefputfile, then fetch it back
 # chunk by chunk. Any file bigger than one block_size (default 1024 B) is
@@ -200,13 +227,14 @@ app): same as Mode A but skip `csmgrdstart`/`csmgrstatus`/`cefstatus` and
 mode_b.sh` too, for the same reasons as Mode A (the `trap`/`exit` stop
 guards need an unreset environment, and need a real shell rather than
 being pasted statement by statement): the producer/consumer/state_freshness
-sequence is identical, including the same `trap cleanup EXIT` and the same
-`exit` on a failed item 2 or 4 -- substitute it in place of the comment
-below rather than skipping the stop-on-failure guards because this mode's
-own snippet looks shorter:
+sequence below is the same as Mode A's, including the same
+`trap cleanup EXIT` and the same `exit` on a failed item 2 or 4 -- do not
+drop those stop-on-failure guards just because this mode's block is
+shorter than Mode A's:
 
 ```bash
-# ORCHESTRATOR MUST RUN (root)
+# ORCHESTRATOR MUST RUN (root), from /home/lab_shared/cefpyco
+PY=/home/lab_shared/cefore-semindex/.venv/bin/python3
 sed -i 's/^CS_MODE=.*/CS_MODE=0/' "$SMOKE_CONF"/cefnetd.conf
 
 PRODUCER_PID=""
@@ -218,11 +246,51 @@ trap cleanup EXIT
 
 sudo cefnetdstart -d "$SMOKE_CONF"
 sleep 1
-# ... producer.py / consumer.py / state_freshness.py exactly as in Mode A,
-# including the CONSUMER_EXIT/FRESHNESS_EXIT checks and their `exit` on
-# failure (there is no CEFPUTFILE_PID or item 5 in this mode) ...
+ls -l /tmp/cef_9695.0   # socket permissions check, see above
+
+# item 1 + 2 (non-csmgrd half) + 3: no Content Store exists in this mode
+# to answer on cefnetd's behalf, so --cache-time-ms/--expiry-ms do not
+# change anything observable here; pass them anyway so Mode A and Mode B
+# invoke the producer identically.
+sudo "$PY" semindex_smoke/producer.py \
+    --prefix ccnx:/semidx/smoke/a --ceforedir "$SMOKE_CONF" \
+    --expiry-ms 1000 --cache-time-ms 0 \
+    > /tmp/semindex-smoke-producer-b.log 2>&1 &
+PRODUCER_PID=$!
+sleep 1   # let register() land before the first Interest
+
+# item 2 + 3: a longer name under the registered prefix must be answered
+sudo "$PY" semindex_smoke/consumer.py \
+    ccnx:/semidx/smoke/a/hello --ceforedir "$SMOKE_CONF"
+CONSUMER_EXIT=$?
+echo "consumer exit: $CONSUMER_EXIT"   # 0 = PASS (items 2 and 3 both hold)
+if [ "$CONSUMER_EXIT" -ne 0 ]; then
+    echo "[RUNBOOK] item 2/3 FAILED -- stopping per the ticket's acceptance criteria" >&2
+    exit "$CONSUMER_EXIT"   # trap above still runs cleanup()
+fi
+
+# item 4: N requests with per-request names, counters must never repeat
+sudo "$PY" semindex_smoke/state_freshness.py \
+    --prefix ccnx:/semidx/smoke/a --ceforedir "$SMOKE_CONF" --count 20
+FRESHNESS_EXIT=$?
+echo "state_freshness exit: $FRESHNESS_EXIT"   # 0 = PASS
+if [ "$FRESHNESS_EXIT" -ne 0 ]; then
+    echo "[RUNBOOK] item 4 FAILED -- stopping per the ticket's acceptance criteria" >&2
+    exit "$FRESHNESS_EXIT"
+fi
+
+sudo kill "$PRODUCER_PID"
+wait "$PRODUCER_PID" 2>/dev/null
+PRODUCER_PID=""   # already stopped; don't let cleanup() try to kill it again
+
 exit 0   # trap above runs cleanup() on the way out either way
 ```
+
+No item 5 and no same-name-twice observation in this mode: item 5 needs
+something to hold a published chunk between `cefputfile` and
+`chunk_fetch.py` (see above), and the same-name-twice observation is
+specifically about whether a Content Store answers a repeat request --
+there is none in CS_MODE=0 to ask that question of.
 
 ## How to read the result
 
@@ -231,7 +299,7 @@ exit 0   # trap above runs cleanup() on the way out either way
 | 1. `create_handle` binds to a node's cefnetd | all four | process starts, `register()`/`send_interest()` don't raise | exception on `create_handle`/`register` |
 | 2. app registered under a prefix receives a longer-name Interest (csmgrd node: Mode A; non-csmgrd node: Mode B) | consumer.py | exit 0 with `name=... counter=...` printed | exit 3 (timeout) -- see "Fog" below |
 | 3. `send_data` (no chunk TLV) answers within `lifetime=2000` | consumer.py | exit 0 | exit 3 (timeout), exit 4 (Data arrived after the lifetime), or exit 1 (wrong/malformed/chunked answer) |
-| 4. state-style names are never answered with an older object | state_freshness.py | exit 0, `PASS: N requests, counters strictly increasing` | exit 1, with the specific request index and counters printed -- **per the ticket, this stops the effort** |
+| 4. state-style names are never answered with an older object | state_freshness.py | exit 0, `PASS: N requests, counters strictly increasing` | exit 1 (freshness violation: wrong shape or a non-increasing counter, with the specific request index and counters printed) or exit 3 (a request timed out with no Data at all) -- **per the ticket, either one stops the effort** |
 | 5. `send_interest(chunk_num=k)` fetches all chunks of a cefputfile object | chunk_fetch.py | exit 0, `PASS: <n> chunks, <bytes> bytes match <file>` | exit 1, with the chunk number or first differing byte printed |
 
 Run both Mode A and Mode B: together they are map.md's Fog question about
@@ -264,6 +332,26 @@ just reported:
   next place to look is **not** this gate.
 - If item 2 fails anyway, the FIB/PIT path itself (not the exact-match gate)
   is the remaining unknown -- live-test it before assuming a cefpyco bug.
+- **It did fail, on 2026-10-22, but not because of the FIB/PIT path:**
+  consumer.py and state_freshness.py both reported `answer carries
+  chunk_num=0, expected no chunk TLV` even though the producer sent
+  `send_data(chunk_num=-1)` (no chunk TLV) and did receive and answer
+  every Interest. Root cause was cefpyco's own Data parser
+  (`cpcparse_try_parse_app_frame_7_5()`, dispatched by
+  `cpcparse_type.c`'s parser table), not Cefore or cefnetd: Cefore's
+  `cef_client_payload_get_with_info()` already tracks chunk-TLV presence
+  separately in `chunk_num_f`, but that parser copied `chunk_num` alone
+  and dropped the flag, so "no chunk TLV" and "chunk 0" both arrived at
+  cefpyco's caller as `chunk_num=0`. Fixed this round by branching on
+  `chunk_num_f`, the same way the Interest-side parser already did.
+
+  The Interest side was checked too (`cpcparse_app_request.c`, which
+  calls `cpc_client_request_get_with_info()` in `cpcparse_tlv.c`, a
+  cefpyco-local copy of Cefore 0.8.2.2's parser -- not Cefore's own
+  current `cef_client_request_get_with_info()` in `cef_client.c`, which
+  is not in this call path at all): it already branched on `chunk_num_f`
+  correctly, so item 2's register()/exact-match-gate analysis above still
+  stands unchanged.
 
 ## Build tree is load-bearing: do not delete it
 
