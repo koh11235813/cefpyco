@@ -320,6 +320,7 @@ short timeout is where the fix actually shows:
 ```bash
 # ORCHESTRATOR MUST RUN (root), with cefnetd already up at $SMOKE_CONF
 # (e.g. right after `sudo cefnetdstart -d "$SMOKE_CONF"` in Mode A/B above)
+PY=/home/lab_shared/cefore-semindex/.venv/bin/python3
 sudo "$PY" -c "
 import cefpyco, time
 with cefpyco.create_handle(ceforedir='$SMOKE_CONF') as h:
