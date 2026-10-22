@@ -57,7 +57,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def wait_for_answer(handle, name: str, lifetime_ms: int) -> int:
+def wait_for_answer(handle, name: str, lifetime_ms: int, send_time: float) -> int:
     """Poll `handle` for the answer to `name` and return the matching EXIT_* code.
 
     A chunkless Data is accepted (EXIT_OK) only if it arrives within
@@ -69,8 +69,14 @@ def wait_for_answer(handle, name: str, lifetime_ms: int) -> int:
     chunked reply is answering a different kind of request. All printing
     happens here so a real cefnetd and a test's fake handle produce the
     same pass/fail message.
+
+    `send_time` is a time.monotonic() reading the caller takes before
+    send_interest() is called, not a timestamp this function takes itself
+    -- send_interest() takes its own measurable wall-clock time to build and
+    hand the Interest to cefnetd, and starting the clock only after it
+    returns would undercount how much of the Interest's lifetime has
+    already elapsed once this function starts polling.
     """
-    send_time = time.monotonic()
     lifetime_s = lifetime_ms / 1000.0
     poll_deadline = send_time + lifetime_s + LATE_POLL_MARGIN_S
     while time.monotonic() < poll_deadline:
@@ -122,11 +128,16 @@ def wait_for_answer(handle, name: str, lifetime_ms: int) -> int:
 def run(args: argparse.Namespace) -> int:
     """Send one chunk-less Interest for `args.name` and wait up to `--lifetime-ms` for the Data."""
     with cefpyco.create_handle(ceforedir=args.ceforedir, portnum=args.portnum) as handle:
+        # 2026-10-22 fix: take the start timestamp here, before send_interest(),
+        # and hand it to wait_for_answer() rather than letting that function
+        # take it after send_interest() has already returned -- see
+        # wait_for_answer()'s docstring for why that gap matters.
+        send_time = time.monotonic()
         # chunk_num=-1: no chunk TLV, matching the producer's no-chunk
         # send_data. core.py's own default is chunk_num=0, which would NOT
         # match and would make this a different (chunked) Interest.
         handle.send_interest(args.name, chunk_num=-1, lifetime=args.lifetime_ms)
-        return wait_for_answer(handle, args.name, args.lifetime_ms)
+        return wait_for_answer(handle, args.name, args.lifetime_ms, send_time)
 
 
 def main(argv: list[str] | None = None) -> int:

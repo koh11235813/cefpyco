@@ -60,8 +60,8 @@ def first_difference(a: bytes, b: bytes) -> int:
     """Return the index of the first byte where `a` and `b` differ.
 
     If one is a prefix of the other, returns the length of the shorter one
-    (the point where the comparison runs out of bytes on one side). Pulled
-    out of run() so the off-by-one-prone boundary cases -- equal inputs,
+    (the point where the comparison runs out of bytes on one side). Kept as
+    its own function so the off-by-one-prone boundary cases -- equal inputs,
     one a strict prefix of the other, differing at index 0 -- have their own
     test instead of being exercised only end-to-end through cefnetd.
     """

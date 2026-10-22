@@ -24,12 +24,23 @@ from wire import decode_answer
 
 RECEIVE_TIMEOUT_MS = 100
 
+EXIT_OK = 0
+EXIT_FRESHNESS_VIOLATION = 1
+# 2026-10-22 fix: a request that timed out (no Data at all) and one that
+# got a Data back with a stale or malformed counter both used to return
+# exit 1, so a caller could not tell "the producer never answered" from
+# "the producer answered with a freshness violation" from the exit code
+# alone. Giving timeout its own code, and the same numeric value
+# consumer.py already uses for EXIT_TIMEOUT, means exit 3 means the same
+# thing in both smoke scripts.
+EXIT_TIMEOUT = 3
+
 
 def _positive_int(value: str) -> int:
     """argparse type for --count: reject anything less than 1.
 
     2026-10-22 fix: --count 0 (or negative) used to send no requests and
-    fall straight through to run()'s final "PASS: N requests, counters
+    fall straight through to the final "PASS: N requests, counters
     strictly increasing" print with no request behind it to back that up.
     Rejected at argument-parsing time instead of silently producing
     unearned evidence.
@@ -77,9 +88,10 @@ def request_name(prefix: str, req_index: int) -> str:
 def is_fresh(counter: int, last_counter: int | None) -> bool:
     """Return True if `counter` is strictly greater than `last_counter` (or there is none yet).
 
-    Pulled out of run() so the exact boundary that matters here -- a repeat
-    (counter == last_counter) is a FAIL, not just a decrease -- has its own
-    test instead of being exercised only end-to-end through cefnetd.
+    Kept as its own function so the exact boundary that matters here -- a
+    repeat (counter == last_counter) is a FAIL, not just a decrease -- has
+    its own test instead of being exercised only end-to-end through
+    cefnetd.
     """
     return last_counter is None or counter > last_counter
 
@@ -147,18 +159,18 @@ def run(args: argparse.Namespace) -> int:
                     f"[state_freshness] FAIL: request {req_index} ({name}) timed out",
                     file=sys.stderr,
                 )
-                return 1
+                return EXIT_TIMEOUT
 
             ok, message, counter = validate_answer(info, name, last_counter)
             if not ok:
                 print(f"[state_freshness] FAIL: request {req_index}: {message}", file=sys.stderr)
-                return 1
+                return EXIT_FRESHNESS_VIOLATION
 
             print(f"[state_freshness] request {req_index}: counter={counter} OK")
             last_counter = counter
 
     print(f"[state_freshness] PASS: {args.count} requests, counters strictly increasing")
-    return 0
+    return EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:

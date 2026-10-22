@@ -1,19 +1,23 @@
 """Fake-handle tests for the receive-side accept/reject logic: no cefnetd, no root required.
 
-consumer.wait_for_answer() and state_freshness.validate_answer() both decide
-whether a received packet counts as a real pass, by inspecting timing and
-packet shape rather than just "something with the right name arrived". Those
-decisions cannot be exercised through test_wire.py's pure-value tests alone,
-since they depend on a handle's receive() calls and (for consumer.py) on
-elapsed wall-clock time -- so this module supplies a minimal fake handle and
-a controllable fake clock to drive them deterministically.
+consumer.wait_for_answer(), state_freshness.validate_answer()/run(), and
+chunk_fetch.fetch_chunk()/run() all decide whether a received packet counts
+as a real pass, by inspecting timing and packet shape rather than just
+"something with the right name arrived". Those decisions cannot be
+exercised through test_wire.py's pure-value tests alone, since they depend
+on a handle's receive()/send_interest() calls and (for consumer.py and
+chunk_fetch.py) on elapsed wall-clock time -- so this module supplies
+minimal fake handles and a controllable fake clock to drive them
+deterministically.
 
 Run with: .venv/bin/python3 -m pytest semindex_smoke/test_receive_guards.py -v
 """
 
 from __future__ import annotations
 
+import chunk_fetch
 import consumer
+import state_freshness
 from state_freshness import validate_answer
 from wire import encode_answer
 
@@ -39,14 +43,46 @@ class _FakePacket:
         name: str = "",
         payload: bytes = b"",
         chunk_num: int | None = None,
+        end_chunk_num: int | None = None,
         is_data: bool = False,
         is_interest_return: bool = False,
     ) -> None:
         self.name = name
         self.payload = payload
         self.chunk_num = chunk_num
+        self.end_chunk_num = end_chunk_num
         self.is_data = is_data
         self.is_interest_return = is_interest_return
+
+
+class _HandleContext:
+    """Context manager stand-in for `cefpyco.create_handle(...)`, yielding a given fake handle.
+
+    run()-level tests monkeypatch `cefpyco.create_handle` with a callable
+    returning one of these, so `with cefpyco.create_handle(...) as handle:`
+    in the script under test gets the fake handle without a real cefnetd.
+    """
+
+    def __init__(self, handle) -> None:
+        self._handle = handle
+
+    def __enter__(self):
+        return self._handle
+
+    def __exit__(self, *exc_info) -> None:
+        return None
+
+
+class _NullHandle:
+    """A handle stand-in for run()-level tests that stub out receive()/validation at a higher level.
+
+    send_interest() is a no-op; these tests monkeypatch the helper
+    functions run() calls (wait_for_data(), validate_answer()) rather than
+    having this handle answer receive() itself.
+    """
+
+    def send_interest(self, *args, **kwargs) -> None:
+        pass
 
 
 class _FakeHandle:
@@ -79,36 +115,46 @@ class _FakeHandle:
 
 
 def test_wait_for_answer_accepts_data_within_lifetime(monkeypatch):
+    """A chunkless Data arriving before the Interest's lifetime elapses passes."""
     clock = _FakeClock()
     monkeypatch.setattr(consumer.time, "monotonic", lambda: clock.now)
     name = "ccnx:/semidx/smoke/a/hello"
     answer = _FakePacket(name=name, payload=encode_answer(name, 3), is_data=True)
     handle = _FakeHandle(clock, answer, arrival_s=1.9)
-    assert consumer.wait_for_answer(handle, name, lifetime_ms=2000) == consumer.EXIT_OK
+    assert consumer.wait_for_answer(handle, name, lifetime_ms=2000, send_time=clock.now) == consumer.EXIT_OK
 
 
 def test_wait_for_answer_rejects_data_after_lifetime(monkeypatch):
-    # A reply at simulated 2.5s is inside the 1.0s late-poll margin (so it
-    # is observed at all) but past the 2000ms lifetime the probe must be
-    # answered within -- this must not be scored as a pass.
+    """A reply at simulated 2.5s is inside the 1.0s late-poll margin (so it
+    is observed at all) but past the 2000ms lifetime the probe must be
+    answered within -- this must not be scored as a pass.
+    """
     clock = _FakeClock()
     monkeypatch.setattr(consumer.time, "monotonic", lambda: clock.now)
     name = "ccnx:/semidx/smoke/a/hello"
     answer = _FakePacket(name=name, payload=encode_answer(name, 3), is_data=True)
     handle = _FakeHandle(clock, answer, arrival_s=2.5)
-    assert consumer.wait_for_answer(handle, name, lifetime_ms=2000) == consumer.EXIT_LATE_ANSWER
+    assert (
+        consumer.wait_for_answer(handle, name, lifetime_ms=2000, send_time=clock.now)
+        == consumer.EXIT_LATE_ANSWER
+    )
 
 
 def test_wait_for_answer_rejects_chunked_data(monkeypatch):
+    """A Data matching the requested name but carrying a chunk_num is EXIT_WRONG_ANSWER."""
     clock = _FakeClock()
     monkeypatch.setattr(consumer.time, "monotonic", lambda: clock.now)
     name = "ccnx:/semidx/smoke/a/hello"
     answer = _FakePacket(name=name, payload=encode_answer(name, 3), chunk_num=0, is_data=True)
     handle = _FakeHandle(clock, answer, arrival_s=0.5)
-    assert consumer.wait_for_answer(handle, name, lifetime_ms=2000) == consumer.EXIT_WRONG_ANSWER
+    assert (
+        consumer.wait_for_answer(handle, name, lifetime_ms=2000, send_time=clock.now)
+        == consumer.EXIT_WRONG_ANSWER
+    )
 
 
 def test_wait_for_answer_times_out_when_nothing_arrives(monkeypatch):
+    """No matching Data within the lifetime plus late-poll margin is EXIT_TIMEOUT."""
     clock = _FakeClock()
     monkeypatch.setattr(consumer.time, "monotonic", lambda: clock.now)
     name = "ccnx:/semidx/smoke/a/hello"
@@ -116,7 +162,10 @@ def test_wait_for_answer_times_out_when_nothing_arrives(monkeypatch):
     # delivered within the window wait_for_answer() polls.
     answer = _FakePacket(name=name, payload=encode_answer(name, 3), is_data=True)
     handle = _FakeHandle(clock, answer, arrival_s=10.0)
-    assert consumer.wait_for_answer(handle, name, lifetime_ms=2000) == consumer.EXIT_TIMEOUT
+    assert (
+        consumer.wait_for_answer(handle, name, lifetime_ms=2000, send_time=clock.now)
+        == consumer.EXIT_TIMEOUT
+    )
 
 
 # --- state_freshness.validate_answer(): shape and freshness gate ----------
@@ -143,3 +192,120 @@ def test_validate_answer_rejects_non_fresh_counter():
     ok, message, counter = validate_answer(info, name, last_counter=4)
     assert (ok, counter) == (False, None)
     assert message == "counter 4 is not fresh (last counter seen was 4)"
+
+
+# --- state_freshness.run(): timeout vs freshness-violation exit codes -----
+
+
+def _state_freshness_args():
+    """Build a minimal state_freshness argparse.Namespace for run()-level tests."""
+    return state_freshness.parse_args(
+        ["--prefix", "ccnx:/semidx/g1/h0", "--ceforedir", "/tmp", "--count", "1"]
+    )
+
+
+def test_run_returns_exit_timeout_when_no_data_arrives(monkeypatch):
+    """A request with no Data at all (wait_for_data() returns None) is EXIT_TIMEOUT, not EXIT_FRESHNESS_VIOLATION."""
+    monkeypatch.setattr(
+        state_freshness.cefpyco, "create_handle", lambda **kwargs: _HandleContext(_NullHandle())
+    )
+    monkeypatch.setattr(state_freshness, "wait_for_data", lambda handle, name, lifetime_ms: None)
+    assert state_freshness.run(_state_freshness_args()) == state_freshness.EXIT_TIMEOUT
+
+
+def test_run_returns_exit_freshness_violation_on_stale_counter(monkeypatch):
+    """A Data that arrives but fails validate_answer() is EXIT_FRESHNESS_VIOLATION, not EXIT_TIMEOUT."""
+    monkeypatch.setattr(
+        state_freshness.cefpyco, "create_handle", lambda **kwargs: _HandleContext(_NullHandle())
+    )
+    monkeypatch.setattr(state_freshness, "wait_for_data", lambda handle, name, lifetime_ms: _FakePacket())
+    monkeypatch.setattr(
+        state_freshness, "validate_answer", lambda info, name, last_counter: (False, "stale", None)
+    )
+    assert state_freshness.run(_state_freshness_args()) == state_freshness.EXIT_FRESHNESS_VIOLATION
+
+
+def test_run_returns_exit_ok_when_every_request_is_fresh(monkeypatch):
+    """A request whose Data passes validate_answer() still returns EXIT_OK after the exit-code split."""
+    monkeypatch.setattr(
+        state_freshness.cefpyco, "create_handle", lambda **kwargs: _HandleContext(_NullHandle())
+    )
+    monkeypatch.setattr(state_freshness, "wait_for_data", lambda handle, name, lifetime_ms: _FakePacket())
+    monkeypatch.setattr(state_freshness, "validate_answer", lambda info, name, last_counter: (True, None, 1))
+    assert state_freshness.run(_state_freshness_args()) == state_freshness.EXIT_OK
+
+
+# --- chunk_fetch.fetch_chunk() / run(): per-chunk request/response loop ---
+
+
+class _ChunkFakeHandle:
+    """Hands back the canned Data for whichever chunk_num the last send_interest() asked for.
+
+    fetch_chunk() sends one Interest per chunk_num, then polls receive()
+    until a Data whose chunk_num matches arrives. This fake tracks only the
+    most recently requested chunk_num and delivers that chunk's payload
+    once; a request for a chunk_num outside `chunks` (or a second receive()
+    before the next send_interest()) gets a no-op `_FakePacket`, which
+    surfaces in the caller as a timeout rather than a wrong-chunk mixup.
+    """
+
+    def __init__(self, clock: _FakeClock, chunks: dict[int, bytes], end_chunk_num: int) -> None:
+        self._clock = clock
+        self._chunks = chunks
+        self._end_chunk_num = end_chunk_num
+        self._pending_chunk_num: int | None = None
+
+    def send_interest(self, name: str, chunk_num: int, lifetime: int) -> None:
+        self._pending_chunk_num = chunk_num
+
+    def receive(self, timeout_ms: int) -> _FakePacket:
+        self._clock.now += 0.1
+        chunk_num = self._pending_chunk_num
+        if chunk_num is None or chunk_num not in self._chunks:
+            return _FakePacket()
+        self._pending_chunk_num = None
+        end_chunk_num = chunk_num if chunk_num == self._end_chunk_num else None
+        return _FakePacket(
+            name="ccnx:/semidx/smoke/file",
+            payload=self._chunks[chunk_num],
+            chunk_num=chunk_num,
+            end_chunk_num=end_chunk_num,
+            is_data=True,
+        )
+
+
+def test_fetch_chunk_returns_the_matching_chunk(monkeypatch):
+    """fetch_chunk() returns the Data whose chunk_num matches what it just requested."""
+    clock = _FakeClock()
+    monkeypatch.setattr(chunk_fetch.time, "monotonic", lambda: clock.now)
+    name = "ccnx:/semidx/smoke/file"
+    handle = _ChunkFakeHandle(clock, chunks={2: b"chunk-two"}, end_chunk_num=2)
+    info = chunk_fetch.fetch_chunk(handle, name, chunk_num=2, lifetime_ms=2000)
+    assert info is not None
+    assert (info.chunk_num, info.payload) == (2, b"chunk-two")
+
+
+def test_fetch_chunk_times_out_when_no_chunk_matches(monkeypatch):
+    """fetch_chunk() returns None if no Data with the requested chunk_num ever arrives."""
+    clock = _FakeClock()
+    monkeypatch.setattr(chunk_fetch.time, "monotonic", lambda: clock.now)
+    name = "ccnx:/semidx/smoke/file"
+    # chunk 5 is never in this handle's canned chunks, so every receive() is a no-op _FakePacket.
+    handle = _ChunkFakeHandle(clock, chunks={0: b"chunk-zero"}, end_chunk_num=0)
+    info = chunk_fetch.fetch_chunk(handle, name, chunk_num=5, lifetime_ms=10)
+    assert info is None
+
+
+def test_run_reassembles_a_multi_chunk_file(monkeypatch, tmp_path):
+    """run() fetches every chunk in order and passes when the reassembled bytes match the source file."""
+    clock = _FakeClock()
+    monkeypatch.setattr(chunk_fetch.time, "monotonic", lambda: clock.now)
+    chunks = {0: b"hello-", 1: b"world!"}
+    handle = _ChunkFakeHandle(clock, chunks=chunks, end_chunk_num=1)
+    monkeypatch.setattr(chunk_fetch.cefpyco, "create_handle", lambda **kwargs: _HandleContext(handle))
+
+    source_file = tmp_path / "source.bin"
+    source_file.write_bytes(b"hello-world!")
+
+    args = chunk_fetch.parse_args(["ccnx:/semidx/smoke/file", str(source_file), "--ceforedir", "/tmp"])
+    assert chunk_fetch.run(args) == 0
